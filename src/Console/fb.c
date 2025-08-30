@@ -1,0 +1,154 @@
+#include <stdint.h>
+#include <stddef.h>
+#include "fb.h"
+
+static void *fb_addr;
+static uint32_t fb_w, fb_h, fb_pitch;
+static uint16_t fb_bpp;
+static uint32_t fg_col = 0xFFFFFF;
+static uint32_t bg_col = 0x000000;
+static uint32_t cell_w = 8, cell_h = 16;
+static uint32_t cur_x, cur_y;
+
+static const uint8_t d0[7]={0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
+static const uint8_t d1[7]={0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
+static const uint8_t d2[7]={0x0E,0x11,0x01,0x02,0x04,0x08,0x1F};
+static const uint8_t d3[7]={0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E};
+static const uint8_t d4[7]={0x12,0x12,0x12,0x1F,0x02,0x02,0x02};
+static const uint8_t d5[7]={0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E};
+static const uint8_t d6[7]={0x06,0x08,0x10,0x1E,0x11,0x11,0x0E};
+static const uint8_t d7[7]={0x1F,0x01,0x02,0x04,0x08,0x08,0x08};
+static const uint8_t d8[7]={0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
+static const uint8_t d9[7]={0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C};
+
+static const uint8_t A_[7]={0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
+static const uint8_t B_[7]={0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
+static const uint8_t C_[7]={0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
+static const uint8_t D_[7]={0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
+static const uint8_t E_[7]={0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
+static const uint8_t F_[7]={0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
+static const uint8_t G_[7]={0x0E,0x11,0x10,0x17,0x11,0x11,0x0E};
+static const uint8_t H_[7]={0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
+static const uint8_t I_[7]={0x0E,0x04,0x04,0x04,0x04,0x04,0x0E};
+static const uint8_t J_[7]={0x01,0x01,0x01,0x01,0x11,0x11,0x0E};
+static const uint8_t K_[7]={0x11,0x12,0x14,0x18,0x14,0x12,0x11};
+static const uint8_t L_[7]={0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
+static const uint8_t M_[7]={0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
+static const uint8_t N_[7]={0x11,0x19,0x15,0x13,0x11,0x11,0x11};
+static const uint8_t O_[7]={0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
+static const uint8_t P_[7]={0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
+static const uint8_t Q_[7]={0x0E,0x11,0x11,0x11,0x15,0x12,0x0D};
+static const uint8_t R_[7]={0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
+static const uint8_t S_[7]={0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
+static const uint8_t T_[7]={0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
+static const uint8_t U_[7]={0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
+static const uint8_t V_[7]={0x11,0x11,0x11,0x11,0x11,0x0A,0x04};
+static const uint8_t W_[7]={0x11,0x11,0x11,0x15,0x15,0x1B,0x11};
+static const uint8_t X_[7]={0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
+static const uint8_t Y_[7]={0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
+static const uint8_t Z_[7]={0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
+
+static const uint8_t SP[7]={0,0,0,0,0,0,0};
+static const uint8_t GT[7]={0x01,0x02,0x04,0x08,0x04,0x02,0x01};
+static const uint8_t LT[7]={0x10,0x08,0x04,0x02,0x04,0x08,0x10};
+static const uint8_t EQ[7]={0x00,0x00,0x1F,0x00,0x1F,0x00,0x00};
+static const uint8_t MI[7]={0x00,0x00,0x1F,0x00,0x00,0x00,0x00};
+static const uint8_t DO[7]={0x00,0x00,0x00,0x00,0x00,0x04,0x04};
+static const uint8_t CO[7]={0x00,0x04,0x04,0x00,0x00,0x04,0x04};
+static const uint8_t EX[7]={0x04,0x04,0x04,0x04,0x04,0x00,0x04};
+static const uint8_t QM[7]={0x0E,0x11,0x01,0x02,0x04,0x00,0x04};
+
+static const uint8_t *glyph_for(char c){
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    if (c >= '0' && c <= '9'){
+        static const uint8_t* D[10]={d0,d1,d2,d3,d4,d5,d6,d7,d8,d9};
+        return D[c - '0'];
+    }
+    if (c >= 'A' && c <= 'Z'){
+        static const uint8_t* L[26]={A_,B_,C_,D_,E_,F_,G_,H_,I_,J_,K_,L_,M_,N_,O_,P_,Q_,R_,S_,T_,U_,V_,W_,X_,Y_,Z_};
+        return L[c - 'A'];
+    }
+    if (c==' ') return SP;
+    if (c=='>') return LT;
+    if (c=='<') return GT;
+    if (c=='=') return EQ;
+    if (c=='-') return MI;
+    if (c=='.') return DO;
+    if (c==':') return CO;
+    if (c=='!') return EX;
+    return QM;
+}
+
+static inline void putpix(uint32_t x, uint32_t y, uint32_t col){
+    if (x >= fb_w || y >= fb_h) return;
+    ((uint32_t*)((uint8_t*)fb_addr + y*fb_pitch))[x] = col;
+}
+
+static void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t col){
+    for (uint32_t r=0;r<h;r++){
+        uint32_t *row = (uint32_t*)((uint8_t*)fb_addr + (y+r)*fb_pitch);
+        for (uint32_t c=0;c<w;c++) row[x+c]=col;
+    }
+}
+
+static void draw_glyph(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg){
+    fill_rect(x,y,cell_w,cell_h,bg);
+    const uint8_t *g = glyph_for(c);
+    uint32_t xoff = 1, yoff = 1;
+    for (uint32_t ry=0; ry<7; ry++){
+        uint8_t row = g[ry];
+        for (uint32_t rx=0; rx<5; rx++){
+            if (row & (1u << (4-rx))){
+                uint32_t px = x + xoff + rx;
+                uint32_t py = y + yoff + ry*2;
+                putpix(px, py, fg);
+                putpix(px, py+1, fg);
+            }
+        }
+    }
+}
+
+static void scroll_up(void){
+    uint32_t step = cell_h;
+    uint32_t bytes = fb_pitch*(fb_h - step);
+    uint8_t *dst = (uint8_t*)fb_addr;
+    uint8_t *src = (uint8_t*)fb_addr + fb_pitch*step;
+    for (uint32_t i=0;i<bytes;i++) dst[i] = src[i];
+    fill_rect(0, fb_h - step, fb_w, step, bg_col);
+    if (cur_y) cur_y--;
+}
+
+void fb_init(void *addr, uint32_t width, uint32_t height, uint32_t pitch, uint16_t bpp){
+    fb_addr = addr; fb_w = width; fb_h = height; fb_pitch = pitch; fb_bpp = bpp;
+    cur_x = cur_y = 0;
+    fb_clear();
+}
+
+void fb_set_colors(uint32_t fg, uint32_t bg){ fg_col = fg; bg_col = bg; }
+
+void fb_clear(void){ fill_rect(0,0,fb_w,fb_h,bg_col); cur_x=0; cur_y=0; }
+
+void fb_putc(char c){
+    if (c=='\r') return;
+    if (c=='\n'){ cur_x=0; cur_y++; if ((cur_y+1)*cell_h > fb_h) scroll_up(); return; }
+    if (c==8 || c==127){ if (cur_x){ cur_x--; draw_glyph(cur_x*cell_w,cur_y*cell_h,' ',fg_col,bg_col);} return; }
+    draw_glyph(cur_x*cell_w,cur_y*cell_h,c,fg_col,bg_col);
+    cur_x++;
+    if ((cur_x+1)*cell_w > fb_w){ cur_x=0; cur_y++; if ((cur_y+1)*cell_h > fb_h) scroll_up(); }
+}
+
+void fb_write(const char *s){ while (*s) fb_putc(*s++); }
+
+void fb_hex64(uint64_t x){
+    static const char *H="0123456789ABCDEF";
+    for (int i=60;i>=0;i-=4) fb_putc(H[(x>>i)&0xF]);
+}
+
+void fb_set_cursor(uint32_t cx, uint32_t cy){ cur_x=cx; cur_y=cy; }
+
+void fb_get_cell_metrics(uint32_t *cw, uint32_t *ch, uint32_t *cols, uint32_t *rows){
+    if (cw) *cw = cell_w;
+    if (ch) *ch = cell_h;
+    if (cols) *cols = fb_w / cell_w;
+    if (rows) *rows = fb_h / cell_h;
+}
