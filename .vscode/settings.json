@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "pit.h": "c",
+        "pic.h": "c",
+        "fb.h": "c",
+        "kbd.h": "c",
+        "complex": "c",
+        "format": "c",
+        "strhelper.h": "c",
+        "commands.h": "c"
+    }
+}

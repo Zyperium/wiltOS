@@ -1,4 +1,5 @@
 rm -rf bin/wiltOS
+rm -rf build/
 
 make
 

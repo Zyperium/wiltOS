@@ -7,40 +7,52 @@ CFLAGS := -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check \
           -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone -mcmodel=kernel
 LDFLAGS := -T linker.lds -nostdlib -z max-page-size=0x1000
 
-# collect all .c files recursively
 SRC := $(shell find src -type f -name '*.c')
-
-# turn src/%.c into obj/%.o
 OBJ := $(patsubst src/%.c,obj/%.o,$(SRC))
-
-# generic compile rule (mirrors folder structure and makes dirs)
-obj/%.o: src/%.c
-	mkdir -p $(@D)
-	$(CC) $(CFLAGS) -I src -c $< -o $@
-
 OUT := bin/wiltOS
 
-all: $(OUT)
-
-$(OUT): $(OBJ) linker.lds
-	mkdir -p $(@D)
-	$(LD) $(LDFLAGS) $(OBJ) -o $@
-
+APPS := edit hello
+APP_CC := $(TOOLCHAIN_PREFIX)gcc
+APP_CFLAGS := -std=gnu11 -ffreestanding -fpie -fno-stack-protector -fno-stack-check \
+              -fno-plt -m64 -march=x86-64 -mno-red-zone -mno-sse -mno-sse2
+APP_LDFLAGS := -nostdlib -Wl,-pie -Wl,-e,app_main -Wl,-z,max-page-size=0x1000
+APP_ELFS := $(addprefix build/,$(addsuffix .elf,$(APPS)))
+INITRD_BINS := $(addprefix initrd/bin/,$(APPS))
+INITRD_DIR := initrd
 INITRD := build/initrd.tar
-$(INITRD):
-	mkdir -p build
-	tar --format=ustar -C initrd -cf $(INITRD) .
+INITRD_SRC := $(shell find $(INITRD_DIR) -type f -o -type l 2>/dev/null)
 
-obj/initrd.o: $(INITRD)
-	mkdir -p $(@D)
-	$(LD) -r -b binary -o $@ $(INITRD)
+.PHONY: all os apps clean
 
-# add obj/initrd.o to link
+all: os apps
+
+os: $(OUT)
+
+apps: $(INITRD) obj/initrd.o
+
 $(OUT): obj/initrd.o $(OBJ) linker.lds
 	mkdir -p $(@D)
 	$(LD) $(LDFLAGS) obj/initrd.o $(OBJ) -o $@
 
+obj/%.o: src/%.c
+	mkdir -p $(@D)
+	$(CC) $(CFLAGS) -I src -c $< -o $@
 
+build/%.elf: apps/%.c src/Exec/app_api.h
+	mkdir -p $(@D)
+	$(APP_CC) $(APP_CFLAGS) $< -o $@ $(APP_LDFLAGS)
+
+initrd/bin/%: build/%.elf
+	mkdir -p $(@D)
+	install -m 0755 $< $@
+
+$(INITRD): $(INITRD_BINS) $(INITRD_SRC)
+	mkdir -p $(@D)
+	tar --format=ustar -C $(INITRD_DIR) -cf $@ .
+
+obj/initrd.o: $(INITRD)
+	mkdir -p $(@D)
+	$(LD) -r -b binary -o $@ $<
 
 clean:
-	rm -rf obj bin image.hdd limine
+	rm -rf obj bin build $(OUT) $(INITRD)

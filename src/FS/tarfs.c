@@ -7,6 +7,8 @@
 #define NAMEBUF_SZ 8192
 
 static struct vnode nodes[MAX_NODES];
+static struct vnode *root;
+static struct vnode *cwd;
 static uint32_t node_cnt;
 static char namebuf[NAMEBUF_SZ];
 static uint32_t name_off;
@@ -19,6 +21,7 @@ static char* nb_dup(const char* s, size_t n){
     d[n]=0; name_off += (uint32_t)(n+1);
     return d;
 }
+
 static struct vnode* new_node(const char* name, size_t n, vtype_t t){
     if (node_cnt >= MAX_NODES) return 0;
     struct vnode *v = &nodes[node_cnt++];
@@ -26,12 +29,14 @@ static struct vnode* new_node(const char* name, size_t n, vtype_t t){
     v->parent=v->sibling=v->child=0; v->data=0; v->size=0;
     return v;
 }
+
 static struct vnode* add_child(struct vnode* dir, struct vnode* n){
     n->parent = dir;
     n->sibling = dir->child;
     dir->child = n;
     return n;
 }
+
 static struct vnode* find_child(struct vnode* dir, const char* name, size_t n){
     for (struct vnode* c=dir->child; c; c=c->sibling){
         const char *a=c->name; size_t i=0; for(;i<n && a[i] && a[i]==name[i];++i){}
@@ -39,11 +44,79 @@ static struct vnode* find_child(struct vnode* dir, const char* name, size_t n){
     }
     return 0;
 }
+
+static struct vnode* walk_from(struct vnode* start, const char* path){
+    struct vnode* cur = (path && path[0]=='/') ? root : (start ? start : root);
+    const char* p = path ? path : "";
+    if (*p=='/') ++p;
+    while (*p){
+        const char* s=p; while (*p && *p!='/') ++p;
+        size_t n=(size_t)(p-s);
+        if (n){
+            if (n==1 && s[0]=='.'){ }
+            else if (n==2 && s[0]=='.' && s[1]=='.'){ if (cur->parent) cur=cur->parent; }
+            else {
+                struct vnode* nxt = find_child(cur, s, n);
+                if (!nxt) return 0;
+                cur = nxt;
+            }
+        }
+        if (*p=='/') ++p;
+    }
+    return cur;
+}
+
+struct vnode* vfs_lookup_at(struct vnode* base, const char *path){
+    return walk_from(base, path);
+}
+
+struct vnode* vfs_get_cwd(void){ return cwd ? cwd : root; }
+void vfs_set_cwd(struct vnode* d){ if (d && d->type==V_DIR) cwd = d; else cwd = root; }
 static int str_eq(const char* a, const char* b){ while(*a&&*b&&*a==*b){++a;++b;} return *a==0&&*b==0; }
+
+int vfs_list_at(struct vnode* base, const char *path, void (*cb)(const char *name, vtype_t type)){
+    struct vnode* n = walk_from(base, path && *path? path : ".");
+    if (!n || n->type != V_DIR) return -1;
+    for (struct vnode* c=n->child; c; c=c->sibling) cb(c->name, c->type);
+    return 0;
+}
+
+int vfs_read_at(struct vnode* base, const char *path, const uint8_t **data, uint64_t *size){
+    struct vnode* n = walk_from(base, path);
+    if (!n || n->type != V_FILE) return -1;
+    if (data) *data = n->data;
+    if (size) *size = n->size;
+    return 0;
+}
+
+int vfs_chdir(const char *path){
+    struct vnode* n = walk_from(vfs_get_cwd(), path);
+    if (!n || n->type != V_DIR) return -1;
+    cwd = n;
+    return 0;
+}
+
+size_t vfs_getcwd(char *dst, size_t cap){
+    if (!dst || cap==0) return 0;
+    const char* parts[64]; size_t lens[64]; size_t cnt=0;
+    struct vnode* n = vfs_get_cwd();
+    while (n && n->parent && cnt<64){ const char* s=n->name; size_t L=0; while(s[L]) L++; parts[cnt]=s; lens[cnt]=L; n=n->parent; cnt++; }
+    size_t pos=0;
+    if (pos<cap) dst[pos++]='/';
+    for (size_t i=0;i<cnt;i++){
+        size_t k = cnt-1-i;
+        for (size_t j=0;j<lens[k] && pos<cap;j++) dst[pos++]=parts[k][j];
+        if (i+1<cnt && pos<cap) dst[pos++]='/';
+    }
+    if (pos>=cap) pos=cap-1;
+    dst[pos]=0;
+    return pos;
+}
 
 void vfs_init(void){
     node_cnt=0; name_off=0;
     root = new_node("",0,V_DIR);
+    cwd = root;
 }
 
 struct vnode* vfs_root(void){ return root; }
@@ -53,14 +126,16 @@ static struct vnode* ensure_path(const char* path){
     const char* p = path;
     while (*p){
         const char* s = p;
-        while (*p && *p!='/') ++p;
+        while (*p && *p != '/') ++p;
         size_t len = (size_t)(p - s);
         if (len){
-            struct vnode* nxt = find_child(cur, s, len);
-            if (!nxt) nxt = add_child(cur, new_node(s,len,V_DIR));
-            cur = nxt;
+            if (!(len == 1 && s[0] == '.')){
+                struct vnode* nxt = find_child(cur, s, len);
+                if (!nxt) nxt = add_child(cur, new_node(s, len, V_DIR));
+                cur = nxt;
+            }
         }
-        if (*p=='/') ++p;
+        if (*p == '/') ++p;
     }
     return cur;
 }
@@ -87,15 +162,22 @@ int vfs_mount_tar(const uint8_t *start, uint64_t len){
     const uint8_t *p = start, *end = start + len;
     while (p + 512 <= end){
         const struct tar_header *h = (const struct tar_header*)p;
-        if (h->name[0]==0) break;
+        if (h->name[0] == 0) break;
+
         char namebuf_full[256];
-        uint32_t off=0;
+        uint32_t off = 0;
+
         if (h->prefix[0]){
-            const char* s=h->prefix; while (*s && off<250) namebuf_full[off++]=*s++;
-            if (off && namebuf_full[off-1] != '/' && off<250) namebuf_full[off++]='/';
+            const char *ps = h->prefix;
+            while (*ps && off < 250) namebuf_full[off++] = *ps++;
+            if (off && namebuf_full[off-1] != '/' && off < 250) namebuf_full[off++] = '/';
         }
-        const char* s=h->name; while (*s && off<255) namebuf_full[off++]=*s++;
-        namebuf_full[off]=0;
+
+        const char *ns = h->name;
+        if (ns[0]=='.' && ns[1]=='/') ns += 2;
+        while (*ns && off < 255) namebuf_full[off++] = *ns++;
+        if (off > 0 && namebuf_full[off-1] == '/') off--;
+        namebuf_full[off] = 0;
 
         uint64_t fsz = octal(h->size, sizeof h->size);
         const uint8_t *data = p + 512;
@@ -104,20 +186,21 @@ int vfs_mount_tar(const uint8_t *start, uint64_t len){
         split_dir_file(namebuf_full, &dirlen, &base, &baselen);
 
         char dironly[256];
-        for (size_t i=0;i<dirlen && i<255;i++) dironly[i]=namebuf_full[i];
-        dironly[dirlen]=0;
+        for (size_t i=0; i<dirlen && i<255; i++) dironly[i] = namebuf_full[i];
+        dironly[dirlen] = 0;
+
         struct vnode* dir = *dironly ? ensure_path(dironly) : root;
 
-        if (h->typeflag=='5'){
+        if (h->typeflag == '5'){
             if (!find_child(dir, base, baselen)) add_child(dir, new_node(base, baselen, V_DIR));
         } else {
             struct vnode* f = find_child(dir, base, baselen);
             if (!f) f = add_child(dir, new_node(base, baselen, V_FILE));
-            f->data = data; f->size = fsz;
+            f->data = data;
+            f->size = fsz;
         }
 
-        uint64_t adv = 512 + ((fsz + 511) & ~511ULL);
-        p += adv;
+        p += 512 + ((fsz + 511) & ~511ULL);
         count++;
     }
     return (int)count;
@@ -153,4 +236,53 @@ int vfs_list(const char *path, void (*cb)(const char *name, vtype_t type)){
     if (!n || n->type != V_DIR) return -1;
     for (struct vnode* c=n->child; c; c=c->sibling) cb(c->name, c->type);
     return 0;
+}
+
+static uint8_t data_arena[256*1024];
+static uint64_t data_off;
+
+static void* arena_alloc(uint64_t n){
+    uint64_t a = (data_off + 0xF) & ~0xFull;
+    if (a + n > sizeof(data_arena)) return 0;
+    data_off = a + n;
+    return &data_arena[a];
+}
+
+int vfs_write_at(struct vnode* base, const char *path, const uint8_t *data, uint64_t size){
+    if (!path || !*path) return -1;
+    struct vnode* cur = (path[0]=='/') ? root : (base?base:root);
+    const char* p = path;
+    if (*p=='/') ++p;
+    const char *s = p, *lasts = 0;
+    size_t lastlen = 0;
+    while (*p){
+        if (*p=='/'){
+            size_t len = (size_t)(p - s);
+            if (len){
+                if (!(len==1 && s[0]=='.')){
+                    struct vnode* nxt = find_child(cur, s, len);
+                    if (!nxt) nxt = add_child(cur, new_node(s, len, V_DIR));
+                    cur = nxt;
+                }
+            }
+            ++p; s = p; continue;
+        }
+        ++p;
+    }
+    lasts = s; lastlen = (size_t)(p - s);
+    if (lastlen==0) return -1;
+    struct vnode* f = find_child(cur, lasts, lastlen);
+    if (!f) f = add_child(cur, new_node(lasts, lastlen, V_FILE));
+    if (!f) return -1;
+    void* dst = arena_alloc(size);
+    if (!dst) return -1;
+    for (uint64_t i=0;i<size;i++) ((uint8_t*)dst)[i]=data[i];
+    f->type = V_FILE;
+    f->data = dst;
+    f->size = size;
+    return 0;
+}
+
+int vfs_write(const char *path, const uint8_t *data, uint64_t size){
+    return vfs_write_at(vfs_root(), path, data, size);
 }

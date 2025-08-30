@@ -71,6 +71,7 @@ static void handle_line(const char* s){
     fb_write(response);
     serial_write(response);
     fb_write("\n> ");
+
 }
 
 void hcf(void) { for (;;) __asm__ __volatile__("hlt"); }
@@ -85,7 +86,7 @@ void kmain(void) {
     fb_set_colors(0xFFFFFF, 0x000000);
     fb_write("wiltOS: fb console ready\n");
 
-    serial_write("wiltOS: hello from 64-bit kernel\n");
+    serial_write("wiltOS: init kernel functions\n");
 
     uint64_t usable_bytes = 0;
     if (memmap_req.response) {
