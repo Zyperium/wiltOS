@@ -1,13 +1,8 @@
 #include <limine.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <limine.h>
 #include "mmu.h"
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_hhdm_request hhdm_req = {
-    .id = LIMINE_HHDM_REQUEST, .revision = 0
-};
+#include "../Boot/limine_requests.h"
 
 static inline uint64_t read_cr3(void){ uint64_t v; __asm__ __volatile__("mov %%cr3,%0":"=r"(v)::); return v; }
 static inline void invlpg(void* p){ __asm__ __volatile__("invlpg (%0)"::"r"(p):"memory"); }

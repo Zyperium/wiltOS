@@ -66,7 +66,7 @@ int kbd_getch(void){
 extern void serial_write(const char*);
 extern void serial_puthex64(uint64_t);
 
-void kbd_irq(void){
+static void kbd_irq(void){
     uint8_t st = inb(0x64);
     if ((st & 0x01) == 0) return;
     uint8_t sc = inb(0x60);
@@ -85,13 +85,17 @@ void kbd_irq(void){
     if (c0 >= 'a' && c0 <= 'z') out = (shift ^ caps) ? (char)(c0 - 32) : c0;
     else out = shift ? (c1 ? c1 : c0) : c0;
 
-    if (!out){
-        serial_write("sc=");
-        serial_puthex64(sc);
-        serial_write("\n");
-        return;
-    }
+    if (!out) return;
 
     qpush(out);
     ext = 0;
+}
+
+void kbd_isr_poll(void){ kbd_irq(); }
+
+void kbd_ps2_drain(void){
+    for (int i=0;i<256;i++){
+        if (inb(0x64) & 1) (void)inb(0x60);
+        else break;
+    }
 }

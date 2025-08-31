@@ -2,7 +2,9 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <limine.h>
-#include "Ports/pmm.h"
+#include "MM/pmm.h"
+#include "MM/vmm.h"
+#include "Memory/kmem.h"
 #include "Ports/pit.h"
 #include "Ports/idt.h"
 #include "Ports/pic.h"
@@ -11,6 +13,11 @@
 #include "Strings/strhelper.h"
 #include "Console/commands.h"
 #include "FS/vfs.h"
+#include "Interrupts/apic.h"
+#include "Boot/limine_requests.h"
+#include "Block/block.h"
+#include "Block/ata_pio.h"
+#include "FS/disk.h"
 
 extern const uint8_t _binary_build_initrd_tar_start[];
 extern const uint8_t _binary_build_initrd_tar_end[];
@@ -19,29 +26,7 @@ extern void serial_write(const char*);
 extern void serial_puthex64(uint64_t);
 extern void serial_putc(char);
 extern void serial_puti64(int64_t);
-
-__attribute__((used, section(".limine_requests")))
-static volatile LIMINE_BASE_REVISION(3);
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request fb_req = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST, .revision = 0
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_kernel_address_request kaddr_req = {
-    .id = LIMINE_KERNEL_ADDRESS_REQUEST, .revision = 0
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_memmap_request memmap_req = {
-    .id = LIMINE_MEMMAP_REQUEST, .revision = 0
-};
-
-__attribute__((used, section(".limine_requests_start")))
-static volatile LIMINE_REQUESTS_START_MARKER;
-__attribute__((used, section(".limine_requests_end")))
-static volatile LIMINE_REQUESTS_END_MARKER;
+extern void idt_set_gate(uint8_t vec, void(*handler)(void));
 
 void *memcpy(void *dst, const void *src, size_t n) {
     uint8_t *d = dst; const uint8_t *s = src;
@@ -78,7 +63,6 @@ void hcf(void) { for (;;) __asm__ __volatile__("hlt"); }
 
 void kmain(void) {
     serial_init();
-    if (!LIMINE_BASE_REVISION_SUPPORTED) hcf();
     if (!fb_req.response || fb_req.response->framebuffer_count < 1) hcf();
 
     struct limine_framebuffer *fb = fb_req.response->framebuffers[0];
@@ -111,14 +95,27 @@ void kmain(void) {
     uint64_t ksize = (uint64_t)(__kernel_end - __kernel_start);
     uint64_t kphys = kaddr_req.response ? kaddr_req.response->physical_base : 0;
     pmm_init(memmap_req.response, kphys, ksize);
+    vmm_init();
+    kmem_init();
     serial_write("wiltOS: kernel phys="); serial_puthex64(kphys);
     serial_write(" size="); serial_puthex64(ksize); serial_write("\n");
 
     idt_init();
-    pic_remap(0x20, 0x28);
-    pit_init(100);
-    kbd_init();
-    pic_setmask(0xFFFC);
+    idt_set_gate(0xFF, (void*)isr_spurious);
+    idt_set_gate(0x20, (void*)isr_lapic_timer);
+    idt_set_gate(0x21, (void*)isr_kbd);
+
+    kbd_ps2_drain();
+    
+    pic_disable();
+    apic_init();
+    ioapic_init(0xFEC00000);
+    ioapic_route_gsi(1, 0x21, 0, 0);
+    lapic_timer_init(0x20, 20000000u, 4);
+
+    disk_setup();
+    serial_write("disk mounted="); serial_puthex64((uint64_t)disk_mounted()); serial_write("\n");
+
     __asm__ __volatile__("sti");
 
     vfs_init();

@@ -1,6 +1,12 @@
 #include "../Strings/strhelper.h"
 #include "commands.h"
 #include "../Exec/exec.h"
+#include "../FS/part.h"
+#include "../FS/fat32.h"
+#include "../Block/ata_pio.h"
+#include "../Memory/kmem.h"
+#include "../FS/disk.h"
+#include "../FS/fat32.h"
 
 extern void serial_write(const char*);
 extern void serial_puthex64(uint64_t);
@@ -11,6 +17,7 @@ extern void serial_puti64(int64_t);
 
 static char outbuf[OUT_MAX];
 static size_t outlen;
+static fat32_t gfs;
 
 static inline void out_reset(void){ outlen = 0; outbuf[0] = 0; }
 static inline void out_putc(char c){ if (outlen + 1 < OUT_MAX){ outbuf[outlen++] = c; outbuf[outlen] = 0; } }
@@ -30,6 +37,17 @@ static void ls_cb_collect(const char *name, vtype_t type){
     out_putc('\n');
 }
 
+static void disk_ls_cb(const char* name, uint32_t size, int is_dir){
+    out_write(name);
+    if (is_dir) out_write("/");
+    else { out_write(" "); out_hex64(size); }
+    out_putc('\n');
+}
+
+static uint32_t cstrlen(const char* s){
+    uint32_t n = 0; while (s && s[n]) n++; return n;
+}
+
 int vfs_list_collect(const char *path, char *dst, size_t cap){
     struct vnode *n = vfs_lookup(path);
     if (!n || n->type != V_DIR) return -1;
@@ -41,6 +59,37 @@ int vfs_list_collect(const char *path, char *dst, size_t cap){
         if (len + 1 < cap) dst[len++] = '\n';
     }
     if (cap) dst[(len < cap) ? len : cap - 1] = 0;
+    return 0;
+}
+
+void disk_init_and_mount(void){
+    static blockdev_t ata = { ata_read, ata_write, 512 };
+    ata_init();
+    block_register(&ata);
+
+    part_t p;
+    if (mbr_find_fat32(&p)==0){
+        fat32_mount(&gfs, block_get0(), p.lba_start);
+    }
+}
+
+static const char* try_run(const char* name, const char* rest){
+    const uint8_t *data; uint64_t sz; int code=0, rc;
+    out_reset();
+    if (vfs_read_at(vfs_get_cwd(), name, &data, &sz) == 0){
+        rc = exec_run_elf(data, sz, rest, &code);
+        if (rc==0){ out_write("exit "); out_putc('0'+(code%10)); return out_get(); }
+        out_write("exec error "); out_hex64((uint64_t)rc); return out_get();
+    }
+    char path[256]; size_t i=0; const char* pre="/bin/"; 
+    while (pre[i] && i<sizeof(path)-1) { path[i]=pre[i]; i++; }
+    for (size_t j=0; name[j] && i<sizeof(path)-1; j++) path[i++]=name[j];
+    path[i]=0;
+    if (vfs_read_at(vfs_get_cwd(), path, &data, &sz) == 0){
+        rc = exec_run_elf(data, sz, rest, &code);
+        if (rc==0){ out_write("exit "); out_putc('0'+(code%10)); return out_get(); }
+        out_write("exec error "); out_hex64((uint64_t)rc); return out_get();
+    }
     return 0;
 }
 
@@ -63,6 +112,35 @@ const char* GetResponse(const char* command, const char* argc){
         out_reset();
         if (vfs_list_at(vfs_get_cwd(), (argc&&*argc)?argc:".", ls_cb_collect)==0){ return out_get(); }
         return "not found";
+    }
+
+    if (CompareLiteral(command,"dls")){
+        out_reset();
+        if (!disk_mounted()){ out_write("disk not mounted\n> "); return out_get(); }
+        int rc = fat32_list_root(disk_fs(), disk_ls_cb);
+        if (rc) out_write("error\n");
+        out_write("> ");
+        return out_get();
+    }
+
+    if (CompareLiteral(command,"dcat")){
+        if (!disk_mounted()) return "disk not mounted\n> ";
+        if (!argc||!*argc) return "usage: dcat NAME.TXT\n> ";
+        uint8_t* buf; uint32_t sz;
+        if (fat32_read_all(disk_fs(), argc, &buf, &sz)==0){
+            out_reset(); out_write_n(buf, sz); kfree(buf); out_putc('\n'); out_write("> ");
+            return out_get();
+        }
+        return "not found\n> ";
+    }
+
+    if (CompareLiteral(command,"dwrite")){
+        if (!disk_mounted()) return "disk not mounted\n> ";
+        if (!argc||!*argc) return "usage: dwrite NAME.TXT\n> ";
+        const char* content = "hello from wiltOS\n";
+        if (fat32_write_all_root(disk_fs(), argc, (const uint8_t*)content, 18)==0)
+            return "ok\n> ";
+        return "fail\n> ";
     }
 
     if (CompareLiteral(command,"run")){
@@ -95,6 +173,10 @@ const char* GetResponse(const char* command, const char* argc){
     if (CompareLiteral(command,"echo"))     return (argc && *argc) ? argc : "\n";
     if (CompareLiteral(command,"shutdown")) return "shutting down\n";
     if (CompareLiteral(command,"help")) return "Help:\n1> echo <arg>\n2> shutdown\n3> ls <path>\n4> cat <path>\n5> pwd <path>\n6> cd <path>\n7> run <path> [arg]\n";
+    
+    const char* r = try_run(command, argc);
+    if (r) return r;
+
     return "Non-existant command, run help for help\n";
 }
 

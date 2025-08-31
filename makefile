@@ -15,7 +15,9 @@ APPS := edit hello
 APP_CC := $(TOOLCHAIN_PREFIX)gcc
 APP_CFLAGS := -std=gnu11 -ffreestanding -fpie -fno-stack-protector -fno-stack-check \
               -fno-plt -m64 -march=x86-64 -mno-red-zone -mno-sse -mno-sse2
-APP_LDFLAGS := -nostdlib -Wl,-pie -Wl,-e,app_main -Wl,-z,max-page-size=0x1000
+APP_LDFLAGS := -nostdlib -Wl,-pie -Wl,-e,app_main \
+               -Wl,-z,max-page-size=0x1000 \
+               -Wl,--no-dynamic-linker -Wl,-static
 APP_ELFS := $(addprefix build/,$(addsuffix .elf,$(APPS)))
 INITRD_BINS := $(addprefix initrd/bin/,$(APPS))
 INITRD_DIR := initrd
