@@ -5,7 +5,7 @@ OS loaded by limine and written in C.
 Limine, x86_64-elf-gcc, x86_64-elf-ld, any virtual machine (I use qemu)
 
 # Status/Known bugs
-1) --API write to disk doesn't actually write to disk
+1) API write to disk doesn't actually write to disk
 2) using new dls commands fail and may cause an error
 3) may be unstable
 
