@@ -7,6 +7,9 @@
 #include "app_api.h"
 #include "exec.h"
 #include "../FS/vfs.h"
+#include "../FS/disk.h"
+#include "../FS/fat32_path.h"
+#include "../FS/paths.h"
 
 extern void serial_write(const char*);
 extern void serial_puthex64(uint64_t);
@@ -150,6 +153,12 @@ static int call_entry_aligned(entry_t entry, const struct app_api* api, const ch
     return ret;
 }
 
+static int api_write_file_impl(const char* abs_path, const uint8_t* data, uint32_t len){
+    const char* sub = disk_subpath(abs_path);
+    if (!sub || !disk_mounted()) return -1;
+    return fat32_write_file_path(disk_fs(), sub, data, len);
+}
+
 static int map_segment(uint64_t dst, uint64_t size, uint32_t pflags){
     uint64_t start = dst & ~0xFFFull;
     uint64_t end   = (dst + size + 0xFFF) & ~0xFFFull;
@@ -234,7 +243,7 @@ int exec_run_elf(const uint8_t *img, uint64_t len, const char *arg, int *exit_co
         }
     }
 
-    struct app_api api = { k_puts, k_putc, k_getch, k_hex, k_write_file };
+    struct app_api api = { k_putc, k_puts, k_getch, api_write_file_impl };
     uint64_t entry = bias + eh->e_entry;
     if (entry < base || entry >= base + total){ unmap_range(base, total); return -12; }
 
