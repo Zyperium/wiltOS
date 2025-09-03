@@ -32,6 +32,85 @@ static int seg11(char out[11], const char* s, size_t n){
     char tmp[16]; if (n>15) n=15; for (size_t i=0;i<n;i++) tmp[i]=s[i]; tmp[n]=0; up11(out,tmp); return 0;
 }
 
+static int eqi(char a, char b){
+    if (a>='a'&&a<='z') a = (char)(a - 32);
+    if (b>='a'&&b<='z') b = (char)(b - 32);
+    return a == b;
+}
+
+static void split83_up(const char* in, char* base, int* blen, char* ext, int* elen){
+    int i=0, bj=0, ej=0, seen_dot=0;
+    while (in[i]){
+        char c = in[i++];
+        if (c=='.'){ seen_dot=1; continue; }
+        if (c>='a'&&c<='z') c = (char)(c-32);
+        if (!seen_dot){
+            if (bj<8) base[bj++]=c;
+        }else{
+            if (ej<3) ext[ej++]=c;
+        }
+    }
+    *blen = bj; *elen = ej;
+}
+
+static int entry_matches_name83(const dirent_t* e, const char* name83){
+    char b[8], x[3]; int bl=0, xl=0;
+    split83_up(name83, b, &bl, x, &xl);
+    int i;
+    for (i=0;i<bl;i++){ char c=e->name[i]; if (c==' ') return 0; if (!eqi(c,b[i])) return 0; }
+    for (;i<8;i++){ if (e->name[i] != ' ') return 0; }
+    for (i=0;i<xl;i++){ char c=e->name[8+i]; if (c==' ') return 0; if (!eqi(c,x[i])) return 0; }
+    for (;i<3;i++){ if (e->name[8+i] != ' ') return 0; }
+    return 1;
+}
+
+int fat32_read_stream_root83(fat32_t* fs, const char* name83,
+                                    int (*sink)(const uint8_t* data, uint32_t len)){
+    if (!fs || !name83 || !*name83) return -1;
+    uint32_t cl = fs->root_clus;
+    uint32_t bps=fs->bytes_per_sec, spc=fs->sec_per_clus;
+    dirent_t hit; int found=0;
+
+    for(;;){
+        uint64_t lba0 = fs->part_lba + fs->data_lba + (uint64_t)(cl-2)*spc;
+        for (uint32_t s=0; s<spc; s++){
+            uint8_t sec[512];
+            if (fs->b->read(lba0+s,1,sec)) return -1;
+            dirent_t* de=(dirent_t*)sec;
+            for (uint32_t i=0;i<bps/32;i++,de++){
+                if (de->name[0]==0x00) goto end_scan;
+                if ((uint8_t)de->name[0]==0xE5) continue;
+                if (de->attr==0x0F) continue;
+                if (de->attr & 0x10) continue;
+                if (entry_matches_name83(de, name83)){ hit=*de; found=1; goto end_scan; }
+            }
+        }
+        uint32_t nx; if (fat_get(fs,cl,&nx)) return -1;
+        if (nx>=0x0FFFFFF8) break;
+        cl = nx;
+    }
+end_scan:
+    if (!found) return -1;
+
+    uint32_t fcl = ((uint32_t)hit.clus_hi<<16)|hit.clus_lo;
+    uint32_t left = hit.size;
+    while (left){
+        uint64_t base = fs->part_lba + fs->data_lba + (uint64_t)(fcl-2)*spc;
+        for (uint32_t s=0; s<spc && left; s++){
+            uint8_t sec[512];
+            if (fs->b->read(base+s,1,sec)) return -1;
+            uint32_t take = left > bps ? bps : left;
+            if (sink(sec,take)) return -1;
+            left -= take;
+        }
+        if (!left) break;
+        uint32_t nx; if (fat_get(fs,fcl,&nx)) return -1;
+        if (nx<2 || nx>=0x0FFFFFF8) return -1;
+        fcl = nx;
+    }
+    return 0;
+}
+
 static int find_in_dir11(fat32_t* fs, uint32_t cl, const char name11[11], dirent_t* out, uint32_t* out_cl, uint32_t* out_off){
     uint32_t bps=fs->bytes_per_sec, spc=fs->sec_per_clus;
     for(;;){
@@ -79,11 +158,33 @@ static int walk_path(fat32_t* fs, const char* path, dirent_t* out, uint32_t* out
     return 0;
 }
 
+void up11_from_seg(char out[11], const char* s, size_t n){
+    for (int i=0;i<11;i++) out[i]=' ';
+    int j=0,k=0;
+    for (; k<(int)n && j<11; k++){
+        char c=s[k];
+        if (c=='.'){ j=8; continue; }
+        if (c>='a'&&c<='z') c-=32;
+        out[j++]=c;
+    }
+}
+
 int fat32_is_dir_path(fat32_t* fs, const char* path){
-    dirent_t e; uint32_t pcl=0;
-    if (path[0]==0 || (path[0]=='/'&&path[1]==0)) return 1;
-    if (walk_path(fs,path,&e,&pcl)) return 0;
-    return (e.attr & 0x10) ? 1 : 0;
+    if (!fs || !path) return 0;
+    while (*path=='/') path++;
+    if (!*path) return 1;
+    uint32_t cl = fs->root_clus;
+    for(;;){
+        const char* s = path; while (*path && *path!='/') path++;
+        size_t n = (size_t)(path - s);
+        char n11[11]; up11_from_seg(n11, s, n);
+        dirent_t e; uint32_t dcl, off;
+        if (find_in_dir11(fs, cl, n11, &e, &dcl, &off)) return 0;
+        if ((e.attr & 0x10)==0){ while (*path=='/') path++; return *path==0 ? 0 : 0; }
+        cl = ((uint32_t)e.clus_hi<<16)|e.clus_lo; if (cl<2) cl=fs->root_clus;
+        while (*path=='/') path++;
+        if (!*path) return 1;
+    }
 }
 
 int fat32_list_path(fat32_t* fs, const char* path, void (*cb)(const char* name, uint32_t size, int is_dir)){
@@ -201,17 +302,6 @@ static int dir_find_free_slot_chain(fat32_t* fs, uint32_t dir_cl, uint64_t* out_
         uint32_t nx; if (fat_get(fs,dir_cl,&nx)) return -1;
         if (nx>=0x0FFFFFF8) return -1;
         dir_cl = nx;
-    }
-}
-
-static void up11_from_seg(char out[11], const char* s, size_t n){
-    for (int i=0;i<11;i++) out[i]=' ';
-    int j=0,k=0;
-    for (; k<(int)n && j<11; k++){
-        char c=s[k];
-        if (c=='.'){ j=8; continue; }
-        if (c>='a'&&c<='z') c-=32;
-        out[j++]=c;
     }
 }
 

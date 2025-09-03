@@ -26,12 +26,15 @@ static uint8_t *g_copy_dst;
 static uint64_t g_copy_cap;
 static uint64_t g_copy_got;
 
+static void str_copy(char *d, const char *s, size_t cap){ size_t i=0; while(s && s[i] && i+1<cap){ d[i]=s[i]; i++; } d[i]=0; }
 static inline void out_reset(void){ outlen = 0; outbuf[0] = 0; }
 static inline void out_putc(char c){ if (outlen + 1 < OUT_MAX){ outbuf[outlen++] = c; outbuf[outlen] = 0; } }
 static inline void out_write(const char *s){ while (*s) out_putc(*s++); }
 static inline void out_write_n(const uint8_t *p, uint64_t n){
     for (uint64_t i = 0; i < n && outlen + 1 < OUT_MAX; ++i) out_putc((char)p[i]);
 }
+
+static const char* skip_slashes(const char* s){ while (*s=='/') s++; return s; }
 
 static inline void b_out_hex(uint64_t x){
     static const char H[]="0123456789ABCDEF";
@@ -64,6 +67,63 @@ static int sink_copy_plain(const uint8_t* d, uint32_t n){
     for (uint32_t i = 0; i < n; i++) g_copy_dst[g_copy_got + i] = d[i];
     g_copy_got += n;
     return 0;
+}
+
+static int starts_with(const char* s, const char* p){ while(*p){ if(*s++!=*p++) return 0; } return 1; }
+static int has_slash(const char* s){ for(;*s;s++) if(*s=='/') return 1; return 0; }
+static int ends_with_ci(const char* s, const char* suf){
+    size_t ls=0, le=0; while(s[ls]) ls++; while(suf[le]) le++; if(le>ls) return 0;
+    for(size_t i=0;i<le;i++){ char a=s[ls-le+i], b=suf[i]; if(a>='a'&&a<='z') a-=32; if(b>='a'&&b<='z') b-=32; if(a!=b) return 0; }
+    return 1;
+}
+
+static void to_upper(const char* in, char* out, size_t cap){
+    size_t i=0; while(in[i] && i+1<cap){ char c=in[i]; if (c>='a'&&c<='z') c=(char)(c-32); out[i++]=c; } out[i]=0;
+}
+
+static int try_list_all(fat32_t* fs, const char* sub, void (*cb)(const char*,uint32_t,int)){
+    char a[256], b[256];
+
+    str_copy(a, sub, sizeof a);
+    if (fat32_list_path(fs, (*a? a : "/"), cb) == 0) return 0;
+
+    str_copy(a, sub, sizeof a);
+    size_t n=0; while(a[n]) n++;
+    if (n && a[n-1]!='/'){ a[n++]='/'; a[n]=0; }
+    if (fat32_list_path(fs, (*a? a : "/"), cb) == 0) return 0;
+
+    str_copy(a, "/", sizeof a); size_t k=1; for(size_t i=0; sub[i] && k+1<sizeof a; ++i) a[k++]=sub[i]; a[k]=0;
+    if (fat32_list_path(fs, a, cb) == 0) return 0;
+
+    n=0; while(a[n]) n++; if (n && a[n-1]!='/'){ a[n++]='/'; a[n]=0; }
+    if (fat32_list_path(fs, a, cb) == 0) return 0;
+
+    to_upper(sub, b, sizeof b);
+
+    str_copy(a, b, sizeof a);
+    if (fat32_list_path(fs, (*a? a : "/"), cb) == 0) return 0;
+
+    str_copy(a, b, sizeof a);
+    n=0; while(a[n]) n++; if (n && a[n-1]!='/'){ a[n++]='/'; a[n]=0; }
+    if (fat32_list_path(fs, (*a? a : "/"), cb) == 0) return 0;
+
+    str_copy(a, "/", sizeof a); k=1; for(size_t i=0; b[i] && k+1<sizeof a; ++i) a[k++]=b[i]; a[k]=0;
+    if (fat32_list_path(fs, a, cb) == 0) return 0;
+
+    n=0; while(a[n]) n++; if (n && a[n-1]!='/'){ a[n++]='/'; a[n]=0; }
+    if (fat32_list_path(fs, a, cb) == 0) return 0;
+
+    return -1;
+}
+
+static void force_disk_abs(char* abs, size_t cap){
+    if (starts_with(abs,"/disk")) return;
+    char tmp[256]; size_t i=0, j=0;
+    const char *pre="/disk"; while(pre[j] && i+1<sizeof tmp) tmp[i++]=pre[j++];
+    if (abs[0]!='/') tmp[i++]='/';
+    j=0; while(abs[j] && i+1<sizeof tmp) tmp[i++]=abs[j++];
+    tmp[i]=0;
+    i=0; while(tmp[i] && i+1<cap){ abs[i]=tmp[i]; i++; } abs[i]=0;
 }
 
 static int read_file_into(const char* abs, uint8_t* dst, uint64_t cap, uint64_t* outsz){
@@ -139,21 +199,28 @@ void disk_init_and_mount(void){
 
 static const char* try_run(const char* name, const char* rest){
     out_reset();
-    char abspath[256]; path_resolve(g_cwd, name, abspath, sizeof abspath);
+    char abspath[256]; path_resolve(g_cwd, name, abspath, sizeof abspath); force_disk_abs(abspath,sizeof abspath);
+
     uint64_t sz=0;
     if (read_file_into(abspath, elf_slab, sizeof elf_slab, &sz)==0){
         int code=0; int rc=exec_run_elf(elf_slab, sz, rest, &code);
         if (rc==0){ out_write("exit "); out_putc('0'+(code%10)); return out_get(); }
         out_write("exec error "); b_out_hex((uint64_t)rc); return out_get();
     }
-    char binpath[256]; size_t i=0; const char* pre="/bin/";
-    while (pre[i] && i<sizeof(binpath)-1) { binpath[i]=pre[i]; i++; }
-    for (size_t j=0; name[j] && i<sizeof(binpath)-1; j++) binpath[i++]=name[j];
-    binpath[i]=0;
-    if (read_file_into(binpath, elf_slab, sizeof elf_slab, &sz)==0){
-        int code=0; int rc=exec_run_elf(elf_slab, sz, rest, &code);
-        if (rc==0){ out_write("exit "); out_putc('0'+(code%10)); return out_get(); }
-        out_write("exec error "); b_out_hex((uint64_t)rc); return out_get();
+
+    if (!has_slash(name)){
+        char bin1[256]; str_copy(bin1,"/disk/BIN/",sizeof bin1); size_t k=0; while(bin1[k]) k++; str_copy(bin1+k,name,sizeof bin1 - k);
+        if (read_file_into(bin1, elf_slab, sizeof elf_slab, &sz)==0){
+            int code=0; int rc=exec_run_elf(elf_slab, sz, rest, &code);
+            if (rc==0){ out_write("exit "); out_putc('0'+(code%10)); return out_get(); }
+            out_write("exec error "); b_out_hex((uint64_t)rc); return out_get();
+        }
+        char bin2[256]; str_copy(bin2,"/bin/",sizeof bin2); k=0; while(bin2[k]) k++; str_copy(bin2+k,name,sizeof bin2 - k);
+        if (read_file_into(bin2, elf_slab, sizeof elf_slab, &sz)==0){
+            int code=0; int rc=exec_run_elf(elf_slab, sz, rest, &code);
+            if (rc==0){ out_write("exit "); out_putc('0'+(code%10)); return out_get(); }
+            out_write("exec error "); b_out_hex((uint64_t)rc); return out_get();
+        }
     }
     return 0;
 }
@@ -162,73 +229,79 @@ const char* GetResponse(const char* command, const char* argc){
     if (CompareLiteral(command,"pwd")){ out_reset(); out_write(g_cwd); out_putc('\n'); out_write("> "); return out_get(); }
 
     if (CompareLiteral(command,"cd")){
-        char tmp[256]; const char* p = (argc && *argc)? argc : "/";
-        path_resolve(g_cwd,p,tmp,sizeof tmp);
+        if (!disk_mounted()) return "disk not mounted\n> ";
+
+        char arg[256]; size_t i=0;
+        if (argc && *argc){
+            while (argc[i] && i+1<sizeof arg) { arg[i]=argc[i]; i++; }
+            while (i && (arg[i-1]==' '||arg[i-1]=='\r'||arg[i-1]=='\n'||arg[i-1]=='\t')) i--;
+            arg[i]=0;
+        } else { arg[0]=0; }
+
+        char tmp[256];
+        path_resolve(g_cwd, (arg[0] ? arg : "/"), tmp, sizeof tmp);
+        force_disk_abs(tmp, sizeof tmp);
+
         const char* sub = disk_subpath(tmp);
-        if (sub){
-            if (!disk_mounted()) return "disk not mounted\n> ";
-            if (fat32_is_dir_path(disk_fs(), *sub?sub:"/")){ set_cwd(tmp); return "> "; }
-            return "not found\n> ";
-        } else {
-            if (vfs_chdir(tmp) == 0){ set_cwd(tmp); return "> "; }
-            return "not found\n> ";
-        }
+        serial_write("cd abs="); serial_write(tmp); serial_putc('\n');
+        serial_write("cd sub="); serial_write(sub); serial_putc('\n');
+        if (*sub=='/') sub++;
+        if (!*sub){ set_cwd("/disk"); return "> "; }
+
+        if (fat32_is_dir_path(disk_fs(), sub)){ set_cwd(tmp); return "> "; }
+        return "not found\n> ";
     }
 
     if (CompareLiteral(command,"ls")){
-        char tmp[256]; const char* p = (argc && *argc)? argc : g_cwd;
-        path_resolve(g_cwd,p,tmp,sizeof tmp);
-        const char* sub = disk_subpath(tmp);
+        if (!disk_mounted()) return "disk not mounted\n> ";
+        
+        char arg[256]; size_t i=0;
+        if (argc && *argc){
+            while (argc[i] && i+1<sizeof arg) { arg[i]=argc[i]; i++; }
+            while (i && (arg[i-1]==' '||arg[i-1]=='\r'||arg[i-1]=='\n'||arg[i-1]=='\t')) i--;
+            arg[i]=0;
+        } else { arg[0]=0; }
+    
+        char abs[256];
+        if (arg[0]) path_resolve(g_cwd, arg, abs, sizeof abs);
+        else        str_copy(abs, g_cwd, sizeof abs);
+    
+        force_disk_abs(abs, sizeof abs);
+        const char* sub = skip_slashes(disk_subpath(abs));  /* e.g., "", "bin", "bin/sub" */
+    
         out_reset();
-        if (sub){
-            if (!disk_mounted()){ out_write("disk not mounted\n> "); return out_get(); }
-            if (fat32_list_path(disk_fs(), *sub?sub:"/", ls_out)==0){ out_write("> "); return out_get(); }
-            out_write("not found\n> "); return out_get();
-        } else {
-            if (vfs_list_collect(tmp, tmp, 0)==0){ out_write("(override)\n"); }
-            if (vfs_list(tmp, ls_cb_vfs) == 0){ out_write("> "); return out_get(); }
-            out_write("not found\n> "); return out_get();
-        }
+        if (try_list_all(disk_fs(), sub, ls_out) == 0){ out_write("> "); return out_get(); }
+        out_write("not found\n> "); return out_get();
     }
+
+
 
     if (CompareLiteral(command,"cat")){
         if (!argc || !*argc) return "usage: cat PATH\n> ";
         out_reset();
 
-        char argbuf[256];
-        {
-            size_t i=0; while (argc[i] && i+1<sizeof argbuf) { argbuf[i]=argc[i]; i++; }
-            while (i && (argbuf[i-1]==' ' || argbuf[i-1]=='\r' || argbuf[i-1]=='\n' || argbuf[i-1]=='\t')) i--;
-            argbuf[i]=0;
-        }
+        char argbuf[256]; size_t i=0;
+        while (argc[i] && i+1<sizeof argbuf) { argbuf[i]=argc[i]; i++; }
+        while (i && (argbuf[i-1]==' '||argbuf[i-1]=='\r'||argbuf[i-1]=='\n'||argbuf[i-1]=='\t')) i--;
+        argbuf[i]=0;
 
-        if (argbuf[0]=='/' && argbuf[1]=='d' && argbuf[2]=='i' && argbuf[3]=='s' && argbuf[4]=='k'){
-            if (!disk_mounted()){ out_write("disk not mounted\n> "); return out_get(); }
-            const char* s = argbuf+5; if (*s=='/') s++;
+        if (!disk_mounted()){ out_write("disk not mounted\n> "); return out_get(); }
+
+        const char* s = argbuf;
+        if (s[0]=='/' && s[1]=='d' && s[2]=='i' && s[3]=='s' && s[4]=='k'){ s += 5; if (*s=='/') s++; }
+        else if (s[0]=='/') { s += 1; }
+
+        int has_slash = 0; for (const char* t=s; *t; ++t) if (*t=='/'){ has_slash=1; break; }
+
+        if (has_slash){
             if (fat32_read_stream_path(disk_fs(), *s? s:"/", sink_out)==0){ out_putc('\n'); out_write("> "); return out_get(); }
             out_write("not found\n> "); return out_get();
-        }
-
-        if (g_cwd[0]=='/' && g_cwd[1]=='d' && g_cwd[2]=='i' && g_cwd[3]=='s' && g_cwd[4]=='k' &&
-            (argbuf[0] != '/')) {
-            if (!disk_mounted()){ out_write("disk not mounted\n> "); return out_get(); }
-            if (fat32_read_stream_path(disk_fs(), *argbuf? argbuf:"/", sink_out)==0){ out_putc('\n'); out_write("> "); return out_get(); }
-            out_write("not found\n> "); return out_get();
-        }
-
-        char abs[256];
-        path_resolve(g_cwd, argbuf, abs, sizeof abs);
-        const char* sub = disk_subpath(abs);
-        if (sub){
-            if (!disk_mounted()){ out_write("disk not mounted\n> "); return out_get(); }
-            if (fat32_read_stream_path(disk_fs(), *sub? sub:"/", sink_out)==0){ out_putc('\n'); out_write("> "); return out_get(); }
-            out_write("not found\n> "); return out_get();
         } else {
-            const uint8_t* data; uint64_t sz;
-            if (vfs_read(abs,&data,&sz)==0){ out_write_n(data,(uint32_t)sz); out_putc('\n'); out_write("> "); return out_get(); }
+            if (fat32_read_stream_root83(disk_fs(), *s? s:"/", sink_out)==0){ out_putc('\n'); out_write("> "); return out_get(); }
             out_write("not found\n> "); return out_get();
         }
     }
+
 
     if (CompareLiteral(command,"run")){
         if (!argc||!*argc) return "usage: run PATH [arg]\n> ";

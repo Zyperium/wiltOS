@@ -66,6 +66,7 @@ static int k_write_file(const char* path, const uint8_t* data, uint64_t len){
 #endif
 }
 
+static void str_copy(char *d, const char *s, size_t cap){ size_t i=0; while(s && s[i] && i+1<cap){ d[i]=s[i]; i++; } d[i]=0; }
 
 static int do_rela_block(const uint8_t *img, uint64_t len, uint64_t off, uint64_t sz, uint64_t bias){
     if (!off || !sz) return 0;
@@ -153,9 +154,33 @@ static int call_entry_aligned(entry_t entry, const struct app_api* api, const ch
     return ret;
 }
 
-static int api_write_file_impl(const char* abs_path, const uint8_t* data, uint32_t len){
-    const char* sub = disk_subpath(abs_path);
-    if (!sub || !disk_mounted()) return -1;
+static int starts_with(const char* s, const char* p){ while(*p){ if(*s++!=*p++) return 0; } return 1; }
+static int has_slash(const char* s){ for(;*s;s++) if(*s=='/') return 1; return 0; }
+static int ends_with_ci(const char* s, const char* suf){
+    size_t ls=0, le=0; while(s[ls]) ls++; while(suf[le]) le++; if(le>ls) return 0;
+    for(size_t i=0;i<le;i++){ char a=s[ls-le+i], b=suf[i]; if(a>='a'&&a<='z') a-=32; if(b>='a'&&b<='z') b-=32; if(a!=b) return 0; }
+    return 1;
+}
+
+static int api_write_file_impl(const char* path, const uint8_t* data, uint32_t len){
+    if (!path || !*path || !data) return -1;
+    if (!disk_mounted()) return -2;
+
+    char abs[256];
+    if (path[0]=='/') str_copy(abs, path, sizeof abs);
+    else { str_copy(abs, "/disk/", sizeof abs); size_t k=0; while(abs[k]) k++; str_copy(abs+k, path, sizeof abs - k); }
+
+    if (!starts_with(abs,"/disk")){ char t[256]; str_copy(t,"/disk",sizeof t); size_t k=0; while(t[k]) k++; if (abs[0]!='/') t[k++]='/'; str_copy(t+k,abs,sizeof t - k); str_copy(abs,t,sizeof abs); }
+
+    const char* s = abs + 5; if (*s=='/') s++;
+
+    if (!has_slash(s) && ends_with_ci(s,".ELF")){
+        char binp[256]; str_copy(binp,"/disk/BIN/",sizeof binp); size_t k=0; while(binp[k]) k++; str_copy(binp+k,s,sizeof binp - k);
+        const char* sub = disk_subpath(binp); if (!sub) return -3;
+        return fat32_write_file_path(disk_fs(), sub, data, len);
+    }
+
+    const char* sub = disk_subpath(abs); if (!sub) return -3;
     return fat32_write_file_path(disk_fs(), sub, data, len);
 }
 
