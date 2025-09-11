@@ -31,7 +31,7 @@ int (*getch)(void); // get char (keyboard input)
 
 void (*hex64)(uint64_t); // write hex64
 
-int (*write_file)(const char*, const uint8_t*, uint64_t); // "fake" writing to files will be fixed
+int (*write_file)(const char*, const uint8_t*, uint64_t);
 ```
 once you've included the app_api.h, create your entry:
 ```C
@@ -46,7 +46,21 @@ api->puts("example text printed to console");
 // or
 api->putc('\n');
 ```
-Use run.sh to rebuild your apps. (Note, even though you can `make apps`, it won't add the app to disk.img and therefore if you want to use your compiled binary you've got to either build it manually or use run.sh) 
+an example program could be like this:
+```C
+#include "../src/Exec/app_api.h"
+int app_main(const struct app_api* api, const char* arg) {
+   api->puts("Hello World!\n")
+   int ch;
+   while(ch != '\n') {
+      ch = api->getch();
+      if(ch < 0) { __asm__ _volatile_ ("hlt"); continue; }
+      apit->putc(ch);
+   }
+   return 0;
+}
+```
+Use build.sh to rebuild your apps. (Note, even though you can `make apps`, it won't add the app to disk.img and therefore if you want to use your compiled binary you've got to either build it manually or use run.sh) 
 ```bash
-./run.sh
+./build.sh
 ```
