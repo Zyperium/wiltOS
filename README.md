@@ -55,7 +55,7 @@ int app_main(const struct app_api* api, const char* arg) {
    while(ch != '\n') {
       ch = api->getch();
       if(ch < 0) { __asm__ _volatile_ ("hlt"); continue; }
-      apit->putc(ch);
+      api->putc(ch);
    }
    return 0;
 }
