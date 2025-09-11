@@ -5,20 +5,16 @@ OS loaded by limine and written in C.
 Limine, x86_64-elf-gcc, x86_64-elf-ld, any virtual machine (I use qemu)
 
 # Status/Known bugs
-1) API write to disk doesn't actually write to disk
-2) using new dls commands fail and may cause an error
-3) may be unstable
+1) ls can't display subfolders.
 
 # Commands
 1) help
 2) run <dir> [obsolete]
 3) echo <arg>
 4) cat <dir>
-5) ls <dir>
+5) ls <dir> [unable to list disk subfolders]
 6) cd <dir>
 7) pwd <dir>
-8) dls <dir> [broken]
-9) dcd <dir> [broken]
    
 # API
 For whatever reason, if you want to write an executable for the os, make a new C file in 'apps' and add the .h "../src/Exec/app_api.h" the api supplies a few functions that can be called from your program.
