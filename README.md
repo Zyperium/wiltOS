@@ -50,7 +50,7 @@ an example program could be like this:
 ```C
 #include "../src/Exec/app_api.h"
 int app_main(const struct app_api* api, const char* arg) {
-   api->puts("Hello World!\n")
+   api->puts("Hello World!\n");
    int ch;
    while(ch != '\n') {
       ch = api->getch();
